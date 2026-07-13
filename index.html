@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Beeline GPX Navigace</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; text-align: center; background: #121212; color: #e0e0e0; padding: 20px; margin: 0; }
+        h1 { color: #fff; font-size: 24px; margin-bottom: 5px; }
+        .subtitle { color: #888; font-size: 14px; margin-bottom: 25px; }
+        button { padding: 15px 25px; font-size: 16px; font-weight: bold; margin: 10px; border: none; border-radius: 12px; cursor: pointer; width: 100%; max-width: 300px; transition: transform 0.1s; }
+        button:active { transform: scale(0.98); }
+        .btn-blue { background: #007aff; color: white; }
+        .btn-green { background: #34c759; color: white; }
+        .btn-green:disabled { background: #225e30; color: #888; cursor: not-allowed; }
+        #status { margin: 15px; font-weight: bold; color: #ffcc00; font-size: 16px; }
+        .info-box { background: #1c1c1e; padding: 20px; margin: 15px auto; max-width: 350px; border-radius: 16px; box-shadow: 0 4px 12px rgba(0,0,0,0.5); box-sizing: border-box; }
+        input[type="file"] { display: none; }
+        .file-label { display: inline-block; padding: 12px 20px; background: #2c2c2e; color: #fff; border-radius: 8px; cursor: pointer; margin-top: 10px; font-weight: bold; border: 1px solid #3a3a3c; }
+        .data-val { font-size: 20px; font-weight: bold; color: #fff; }
+    </style>
+</head>
+<body>
+
+    <h1>Beeline Navigace</h1>
+    <div class="subtitle">GPX Ovladač pro iPhone (Bluefy)</div>
+    
+    <div class="info-box">
+        <button class="btn-blue" id="connectBtn">1. Připojit motorku</button>
+        <div id="status">Stav: Odpojeno</div>
+    </div>
+
+    <div class="info-box">
+        <h3>2. Výběr trasy</h3>
+        <label for="gpxFile" class="file-label">Vybrat .GPX soubor</label>
+        <input type="file" id="gpxFile" accept=".gpx">
+        <div id="gpxStatus" style="margin-top: 10px; color: #aaa; font-size: 14px;">Trasa nenačtena</div>
+        <br>
+        <button class="btn-green" id="startNavBtn" disabled>3. Spustit navigaci</button>
+    </div>
+
+    <div class="info-box">
+        <h3>Aktuální data</h3>
+        <p>Úhel šipky: <span id="outAngle" class="data-val">0</span>°</p>
+        <p>Vzdálenost: <span id="outDist" class="data-val">---</span></p>
+    </div>
+
+    <script>
+        const SERVICE_UUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
+        const CHARACTERISTIC_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
+        
+        let bleCharacteristic = null;
+        let gpxPoints = [];
+        let watchId = null;
+
+        // Připojení k ESP32 přes Web Bluetooth
+        document.getElementById('connectBtn').addEventListener('click', async () => {
+            try {
+                document.getElementById('status').innerText = "Vyhledávám...";
+                const device = await navigator.bluetooth.requestDevice({
+                    filters: [{ name: 'Beeline-Prototyp' }],
+                    optionalServices: [SERVICE_UUID]
+                });
+                
+                const server = await device.gatt.connect();
+                const service = await server.getPrimaryService(SERVICE_UUID);
+                bleCharacteristic = await service.getCharacteristic(CHARACTERISTIC_UUID);
+                
+                document.getElementById('status').innerText = "Status: SPOJENO";
+                document.getElementById('status').style.color = "#34c759";
+            } catch (error) {
+                console.error(error);
+                document.getElementById('status').innerText = "Chyba: " + error;
+                document.getElementById('status').style.color = "#ff3b30";
+            }
+        });
+
+        // Načtení GPX souboru s podporou trkpt, rtept i wpt
+        document.getElementById('gpxFile').addEventListener('change', function(e) {
+            const file = e.target.files[0];
+            if (!file) return;
+            
+            document.getElementById('gpxStatus').innerText = "Načítám...";
+            const reader = new FileReader();
+            reader.onload = function(evt) {
+                const parser = new DOMParser();
+                const xmlDoc = parser.parseFromString(evt.target.result, "text/xml");
+                
+                // Vyzkoušíme různé typy bodů v GPX souboru
+                let gpxElements = xmlDoc.getElementsByTagName("trkpt");
+                if (gpxElements.length === 0) {
+                    gpxElements = xmlDoc.getElementsByTagName("rtept"); // Podpora pro Calimoto
+                }
+                if (gpxElements.length === 0) {
+                    gpxElements = xmlDoc.getElementsByTagName("wpt");
+                }
+                
+                gpxPoints = [];
+                for (let i = 0; i < gpxElements.length; i++) {
+                    const lat = parseFloat(gpxElements[i].getAttribute("lat"));
+                    const lon = parseFloat(gpxElements[i].getAttribute("lon"));
+                    if (!isNaN(lat) && !isNaN(lon)) {
+                        gpxPoints.push({ lat, lon });
+                    }
+                }
+                
+                if(gpxPoints.length > 0) {
+                    document.getElementById('gpxStatus').innerText = `Načteno ${gpxPoints.length} bodů`;
+                    document.getElementById('gpxStatus').style.color = "#34c759";
+                    document.getElementById('startNavBtn').disabled = false;
+                } else {
+                    document.getElementById('gpxStatus').innerText = "Chyba: Neplatný GPX soubor";
+                    document.getElementById('gpxStatus').style.color = "#ff3b30";
+                }
+            };
+            reader.readAsText(file);
+        });
+
+        // Výpočet vzdálenosti (Haversine formule)
+        function spoctiVzdalenost(lat1, lon1, lat2, lon2) {
+            const R = 6371e3; 
+            const phi1 = lat1 * Math.PI/180;
+            const phi2 = lat2 * Math.PI/180;
+            const deltaPhi = (lat2-lat1) * Math.PI/180;
+            const deltaLambda = (lon2-lon1) * Math.PI/180;
+            const a = Math.sin(deltaPhi/2) * Math.sin(deltaPhi/2) +
+                      Math.cos(phi1) * Math.cos(phi2) * Math.sin(deltaLambda/2) * Math.sin(deltaLambda/2);
+            return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+        }
+
+        // Výpočet azimutu ke gpx bodu
+        function spoctiAzimut(lat1, lon1, lat2, lon2) {
+            const dLon = (lon2 - lon1) * Math.PI / 180;
+            const lat1Rad = lat1 * Math.PI / 180;
+            const lat2Rad = lat2 * Math.PI / 180;
+            const y = Math.sin(dLon) * Math.cos(lat2Rad);
+            const x = Math.cos(lat1Rad) * Math.sin(lat2Rad) - Math.sin(lat1Rad) * Math.cos(lat2Rad) * Math.cos(dLon);
+            let brng = Math.atan2(y, x) * 180 / Math.PI;
+            return (brng + 360) % 360;
+        }
+
+        // Spuštění sledování GPS polohy iPhonu
+        document.getElementById('startNavBtn').addEventListener('click', () => {
+            if (!navigator.geolocation) return alert("GPS není na tomto zařízení dostupná.");
+            
+            document.getElementById('status').innerText = "Navigace běží...";
+            document.getElementById('status').style.color = "#007aff";
+            
+            watchId = navigator.geolocation.watchPosition(async (position) => {
+                const myLat = position.coords.latitude;
+                const myLon = position.coords.longitude;
+                const myHeading = position.coords.heading || 0; // Směr jízdy z kompasu telefonu
+
+                if (gpxPoints.length === 0) return;
+
+                let cil = gpxPoints[0]; 
+                let vzd = spoctiVzdalenost(myLat, myLon, cil.lat, cil.lon);
+
+                // Pokud jsme k bodu blíž než 20 metrů, smažeme ho a jdeme na další bod trasy
+                if (vzd < 20 && gpxPoints.length > 1) {
+                    gpxPoints.shift();
+                    cil = gpxPoints[0];
+                    vzd = spoctiVzdalenost(myLat, myLon, cil.lat, cil.lon);
+                }
+
+                // Výpočet relativního úhlu šipky vůči směru jízdy motorky
+                let azimutKCiili = spoctiAzimut(myLat, myLon, cil.lat, cil.lon);
+                let uhelSipky = (azimutKCiili - myHeading + 360) % 360;
+
+                // Formátování textu pro metry / kilometry
+                let vzdText = vzd > 1000 ? `${(vzd/1000).toFixed(1)} km` : `${Math.round(vzd)} m`;
+
+                // Vypsání na displej telefonu
+                document.getElementById('outAngle').innerText = Math.round(uhelSipky);
+                document.getElementById('outDist').innerText = vzdText;
+
+                // Odeslání dat přes Bluetooth do ESP32
+                if (bleCharacteristic) {
+                    const dataString = `${Math.round(uhelSipky)},${vzdText}`;
+                    const encoder = new TextEncoder();
+                    await bleCharacteristic.writeValue(encoder.encode(dataString));
+                }
+            }, (err) => alert("Chyba GPS: " + err.message), { 
+                enableHighAccuracy: true, 
+                maximumAge: 0, 
+                timeout: 5000 
+            });
+        });
+    </script>
+</body>
+</html>
