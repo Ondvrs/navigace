@@ -43,9 +43,12 @@
 
     <div class="info-box">
         <h3>Aktuální data</h3>
-        <p>Úhel šipky: <span id="outAngle" class="data-val">0</span>°</p>
+        <p>Aktuální čas: <span id="outClock" class="data-val" style="color: #ffcc00;">--:--</span></p>
         <p>Vzdálenost: <span id="outDist" class="data-val">---</span></p>
+        <p>Zbývající čas: <span id="outTime" class="data-val" style="color: #34c759;">---</span></p>
+        <p style="font-size: 12px; color: #666;">Režim výpočtu: <span id="speedMode">40 km/h (Město)</span></p>
         <div id="wrongWayAlert" style="color: #ff3b30; font-weight: bold; display: none; margin-top: 10px; font-size: 18px;">⚠️ OTOČ SE!</div>
+        <div id="turnAlert" style="color: #ff9f0a; font-weight: bold; display: none; margin-top: 10px; font-size: 18px; animation: blink 0.6s infinite;">⚡ BLÍŽÍ SE ODBOČKA! ⚡</div>
     </div>
 
     <script>
@@ -55,6 +58,30 @@
         let bleCharacteristic = null;
         let gpxPoints = [];
         let currentHeading = 0;
+        let posledniPozice = null;
+
+        // Rychlostní režimy (m/s)
+        const RYCHLOST_MESTO_MS = 11.11; // 40 km/h
+        const RYCHLOST_OKRESKA_MS = 22.22; // 80 km/h
+        let aktivniRychlostMS = RYCHLOST_MESTO_MS; 
+
+        // Funkce pro získání aktuálního času v iPhonu (HH:MM)
+        function ziskejAktualniCas() {
+            const ted = new Date();
+            const hodiny = String(ted.getHours()).padStart(2, '0');
+            const minuty = String(ted.getMinutes()).padStart(2, '0');
+            return `${hodiny}:${minuty}`;
+        }
+
+        // Pravidelná aktualizace hodin na displeji mobilu a odesílání do BT (každou sekundu)
+        setInterval(() => {
+            const casOckem = ziskejAktualniCas();
+            document.getElementById('outClock').innerText = casOckem;
+            
+            if (posledniPozice && gpxPoints.length > 0) {
+                vyhodnotPozici(posledniPozice.lat, posledniPozice.lon, posledniPozice.speed);
+            }
+        }, 1000);
 
         // 1. Bluetooth Připojení
         document.getElementById('connectBtn').addEventListener('click', async () => {
@@ -75,7 +102,7 @@
             }
         });
 
-        // 2. Načtení trasy z Calimota
+        // 2. Načtení trasy
         document.getElementById('gpxFile').addEventListener('change', function(e) {
             const file = e.target.files[0];
             if (!file) return;
@@ -116,37 +143,77 @@
             return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
         }
 
+        function spoctiZbyvajiciVzdalenostTrasy(myLat, myLon) {
+            if (gpxPoints.length === 0) return 0;
+            let celkem = spoctiVzdalenost(myLat, myLon, gpxPoints[0].lat, gpxPoints[0].lon);
+            for (let i = 0; i < gpxPoints.length - 1; i++) {
+                celkem += spoctiVzdalenost(gpxPoints[i].lat, gpxPoints[i].lon, gpxPoints[i+1].lat, gpxPoints[i+1].lon);
+            }
+            return celkem;
+        }
+
+        // Formátování času
+        function formatujCas(vteriny) {
+            const minuty = Math.round(vteriny / 60);
+            if (minuty < 1) return "Dojezd hned";
+            if (minuty < 60) return `${minuty} min`;
+            const h = Math.floor(minuty / 60);
+            const m = minuty % 60;
+            return `${h}h ${m}m`;
+        }
+
         // Výpočet navigace za jízdy
-        async function vyhodnotPozici(myLat, myLon) {
+        async function vyhodnotPozici(myLat, myLon, aktualniRychlostMS) {
             if (gpxPoints.length === 0) return;
+
+            if (aktualniRychlostMS !== null && aktualniRychlostMS !== undefined) {
+                let rychlostKmh = aktualniRychlostMS * 3.6;
+                if (rychlostKmh > 60) {
+                    aktivniRychlostMS = RYCHLOST_OKRESKA_MS;
+                    document.getElementById('speedMode').innerText = "80 km/h (Okreska)";
+                } else if (rychlostKmh > 5) { 
+                    aktivniRychlostMS = RYCHLOST_MESTO_MS;
+                    document.getElementById('speedMode').innerText = "40 km/h (Město)";
+                }
+            }
 
             let cil = gpxPoints[0];
             let vzdalenostKCili = spoctiVzdalenost(myLat, myLon, cil.lat, cil.lon);
 
-            // Pokud jsi blíž než 15 metrů k bodu, bere se jako projetý a přepínáme na další
-            if (vzdalenostKCili < 15 && gpxPoints.length > 1) {
-                gpxPoints.shift();
-                cil = gpxPoints[0];
-                vzdalenostKCili = spoctiVzdalenost(myLat, myLon, cil.lat, cil.lon);
-            }
+            // POZOR: Automatické odmazávání bodu (shift) bylo kompletně odstraněno.
+            // Bod se teď nikdy nesmaže sám jen tím, že kolem něj projedeš.
 
             let azimutKCili = spoctiAzimut(myLat, myLon, cil.lat, cil.lon);
             let uhelSipky = (azimutKCili - currentHeading + 360) % 360;
             let vzdText = vzdalenostKCili > 1000 ? `${(vzdalenostKCili/1000).toFixed(1)} km` : `${Math.round(vzdalenostKCili)} m`;
 
-            // Pokud mineš odbočku o víc než 50 metrů
+            let celkovaVzdalenost = spoctiZbyvajiciVzdalenostTrasy(myLat, myLon);
+            let zbyvajiciCasVteriny = celkovaVzdalenost / aktivniRychlostMS;
+            let casText = formatujCas(zbyvajiciCasVteriny);
+            let aktualniHodiny = ziskejAktualniCas();
+
+            document.getElementById('outTime').innerText = casText;
+
+            // 1. DETEKCE MINUTÍ: Více než 50 metrů mimo bod -> stále ukazuje k němu, ale nutí tě se otočit
             if (vzdalenostKCili > 50) {
                 document.getElementById('wrongWayAlert').style.display = "block";
-                document.getElementById('outAngle').classList.add('alert-mode');
-                document.getElementById('outAngle').innerText = "!!!";
+                document.getElementById('turnAlert').style.display = "none";
                 document.getElementById('outDist').innerText = "OTOC SE";
-                posliDoBluetooth("999,OTOC SE");
-            } else {
+                posliDoBluetooth(`999,${casText},0,${aktualniHodiny}`);
+            } 
+            // 2. BLÍŽÍCÍ SE ODBOČKA: Pod 150 metrů k bodu (příznak blikání "1")
+            else if (vzdalenostKCili < 150) {
                 document.getElementById('wrongWayAlert').style.display = "none";
-                document.getElementById('outAngle').classList.remove('alert-mode');
-                document.getElementById('outAngle').innerText = Math.round(uhelSipky);
+                document.getElementById('turnAlert').style.display = "block";
                 document.getElementById('outDist').innerText = vzdText;
-                posliDoBluetooth(`${Math.round(uhelSipky)},${vzdText}`);
+                posliDoBluetooth(`${Math.round(uhelSipky)},${casText},1,${aktualniHodiny}`);
+            } 
+            // 3. NORMÁLNÍ PROVOZ (příznak blikání "0")
+            else {
+                document.getElementById('wrongWayAlert').style.display = "none";
+                document.getElementById('turnAlert').style.display = "none";
+                document.getElementById('outDist').innerText = vzdText;
+                posliDoBluetooth(`${Math.round(uhelSipky)},${casText},0,${aktualniHodiny}`);
             }
         }
 
@@ -164,7 +231,6 @@
             document.getElementById('status').innerText = "Navigace aktivní";
             document.getElementById('status').style.color = "#34c759";
 
-            // Svolení pro kompas (při zastavení)
             if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
                 try {
                     const permission = await DeviceOrientationEvent.requestPermission();
@@ -176,13 +242,16 @@
                 } catch (e) {}
             }
 
-            // Sledování GPS polohy a směru jízdy
             navigator.geolocation.watchPosition((pos) => {
-                // Pokud jedeme, směr bereme přesně z GPS kurzu
                 if (pos.coords.heading) {
                     currentHeading = pos.coords.heading;
                 }
-                vyhodnotPozici(pos.coords.latitude, pos.coords.longitude);
+                posledniPozice = {
+                    lat: pos.coords.latitude,
+                    lon: pos.coords.longitude,
+                    speed: pos.coords.speed
+                };
+                vyhodnotPozici(pos.coords.latitude, pos.coords.longitude, pos.coords.speed);
             }, null, { enableHighAccuracy: true, maximumAge: 0, timeout: 5000 });
         });
     </script>
