@@ -68,8 +68,8 @@
         let currentHeading = 0;
         let posledniPozice = null;
         
-        let ciloveSouradnice = null; // Pro vyhledávání adresy
-        let isGpxMode = false; // Rozlišení GPX vs Vyhledávání adresy
+        let ciloveSouradnice = null; 
+        let isGpxMode = false; 
 
         const RYCHLOST_MESTO_MS = 11.11; // 40 km/h
         const RYCHLOST_OKRESKA_MS = 22.22; // 80 km/h
@@ -110,7 +110,7 @@
             }
         });
 
-        // REŽIM A: KLASICKÉ VYHLEDÁVÁNÍ ADRESY A SMĚROVÁNÍ PŘES OSRM
+        // REŽIM A: KLASICKÉ VYHLEDÁVÁNÍ ADRESY
         document.getElementById('searchAddressBtn').addEventListener('click', async () => {
             const query = document.getElementById('addressInput').value;
             if (!query) return;
@@ -119,7 +119,6 @@
             document.getElementById('routeStatus').style.color = "#ffcc00";
 
             try {
-                // Vyhledání souřadnic přes Nominatim API
                 const response = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=1`);
                 const data = await response.json();
 
@@ -143,7 +142,7 @@
             }
         });
 
-        // Spočítání/přepočítání trasy k cíli přes silnice (OSRM)
+        // OSRM výpočet trasy
         async function prepocitejTrasuPresSilnice(startLat, startLon, endLat, endLon) {
             try {
                 const response = await fetch(`https://router.project-osrm.org/route/v1/driving/${startLon},${startLat};${endLon},${endLat}?overview=full&geometries=geojson`);
@@ -181,13 +180,12 @@
                     document.getElementById('gpxStatus').style.color = "#34c759";
                     document.getElementById('startNavBtn').disabled = false;
                     isGpxMode = true; 
-                    ciloveSouradnice = gpxPoints[gpxPoints.length - 1]; // Poslední bod GPX je cíl
+                    ciloveSouradnice = gpxPoints[gpxPoints.length - 1]; 
                 }
             };
             reader.readAsText(file);
         });
 
-        // Haversine vzorec pro vzdálenost
         function spoctiVzdalenost(lat1, lon1, lat2, lon2) {
             const R = 6371e3; 
             const phi1 = lat1 * Math.PI/180; const phi2 = lat2 * Math.PI/180;
@@ -196,7 +194,6 @@
             return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
         }
 
-        // Výpočet azimutu
         function spoctiAzimut(lat1, lon1, lat2, lon2) {
             const dLon = (lon2 - lon1) * Math.PI / 180;
             const y = Math.sin(dLon) * Math.cos(lat2 * Math.PI / 180);
@@ -204,7 +201,6 @@
             return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
         }
 
-        // Výpočet celkové zbývající vzdálenosti trasy k cíli
         function spoctiZbyvajiciVzdalenostTrasy(myLat, myLon) {
             if (gpxPoints.length === 0) return 0;
             let celkem = spoctiVzdalenost(myLat, myLon, gpxPoints[0].lat, gpxPoints[0].lon);
@@ -223,16 +219,14 @@
             return `${h}h ${m}m`;
         }
 
-        // Srdce navigační logiky s automatickým přepočtem (Rerouting)
+        // Srdce navigační logiky
         async function vyhodnotPozici(myLat, myLon, aktualniRychlostMS) {
             if (gpxPoints.length === 0 && ciloveSouradnice) {
-                // Pokud máme cíl z adresy, ale nemáme naplánovanou trasu, hned ji poprvé spočítáme
                 await prepocitejTrasuPresSilnice(myLat, myLon, ciloveSouradnice.lat, ciloveSouradnice.lon);
                 return;
             }
             if (gpxPoints.length === 0) return;
 
-            // Správa rychlostních režimů
             if (aktualniRychlostMS !== null && aktualniRychlostMS !== undefined) {
                 let rychlostKmh = aktualniRychlostMS * 3.6;
                 if (rychlostKmh > 60) {
@@ -244,22 +238,19 @@
                 }
             }
 
-            // Aktivní bod k odbočení je první bod v poli gpxPoints
             let aktivniBod = gpxPoints[0];
             let vzdalenostKAktivnimuBodu = spoctiVzdalenost(myLat, myLon, aktivniBod.lat, aktivniBod.lon);
 
-            // LOGIKA PRŮJEZDU BODEM: Pokud jsme blízko bodu (pod 20m), projedeme ho a odebereme z pole
+            // Projetí bodu pod 20 metrů
             if (vzdalenostKAktivnimuBodu < 20 && gpxPoints.length > 1) {
-                gpxPoints.shift(); // Smaže projetý bod, čímž se dalším bodem stává další zatáčka
+                gpxPoints.shift(); 
                 aktivniBod = gpxPoints[0];
                 vzdalenostKAktivnimuBodu = spoctiVzdalenost(myLat, myLon, aktivniBod.lat, aktivniBod.lon);
             }
 
-            // LOGIKA BLOUDĚNÍ / PŘEPOČTU (REROUTING)
-            // Pokud jsme sjeli z cesty dál než 80 metrů od aktuálně plánovaného průjezdního bodu
+            // Přepočet trasy / Bloudění (80+ metrů)
             if (vzdalenostKAktivnimuBodu > 80) {
                 if (isGpxMode) {
-                    // GPX Režim: Pokud sjedeš o více než 80 metrů, ukaž "OTOČ SE"
                     document.getElementById('wrongWayAlert').style.display = "block";
                     document.getElementById('turnAlert').style.display = "none";
                     document.getElementById('outDist').innerText = "OTOC SE";
@@ -267,14 +258,12 @@
                     posliDoBluetooth(`999,---,0,${aktualniHodiny},OTOC SE`);
                     return;
                 } else {
-                    // GPS Režim (Adresa): Pokud sjedeš o 80+ metrů, automaticky přepočítáme trasu k cíli přes silnice!
                     console.log("Sjel jsi z trasy. Přepočítávám novou cestu...");
                     await prepocitejTrasuPresSilnice(myLat, myLon, ciloveSouradnice.lat, ciloveSouradnice.lon);
-                    return; // V dalším tiku už pojedeme podle nové trasy
+                    return; 
                 }
             }
 
-            // Normální výpočty pro Bluetooth
             let azimutKBodu = spoctiAzimut(myLat, myLon, aktivniBod.lat, aktivniBod.lon);
             let uhelSipky = (azimutKBodu - currentHeading + 360) % 360;
             let vzdText = vzdalenostKAktivnimuBodu > 1000 ? `${(vzdalenostKAktivnimuBodu/1000).toFixed(1)} km` : `${Math.round(vzdalenostKAktivnimuBodu)} m`;
@@ -286,8 +275,8 @@
 
             document.getElementById('outTime').innerText = casText;
 
-            // Detekce blížící se zatáčky (Blikání na displeji pod 150 metrů)
-            if (vzdalenostKAktivnimuBodu < 150) {
+            // BLIKÁNÍ NA DISPLEJI POD 40 METRŮ
+            if (vzdalenostKAktivnimuBodu < 40) { // <--- Nastaveno přesně na 40 metrů
                 document.getElementById('wrongWayAlert').style.display = "none";
                 document.getElementById('turnAlert').style.display = "block";
                 document.getElementById('outDist').innerText = vzdText;
@@ -309,7 +298,7 @@
             }
         }
 
-        // 3. Spuštění navigace (senzory GPS a kompasu iPhonu)
+        // Spuštění navigace
         document.getElementById('startNavBtn').addEventListener('click', async () => {
             document.getElementById('status').innerText = "Navigace aktivní";
             document.getElementById('status').style.color = "#34c759";
