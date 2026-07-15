@@ -65,8 +65,7 @@
 
     <div class="info-box">
         <h3>Moje uložené okruhy</h3>
-        <div id="okruhyContainer" class="okruhy-list">
-            </div>
+        <div id="okruhyContainer" class="okruhy-list"></div>
         <div id="okruhStatus" style="margin-top: 10px; color: #aaa; font-size: 14px;">Vyber nebo nahraj trasu</div>
         <br>
         <button class="btn-green" id="startNavBtn" disabled>3. Spustit navigaci</button>
@@ -100,6 +99,7 @@
 
         // Načtení uložených tras z localStorage hned při startu
         let vlastniOkruhy = JSON.parse(localStorage.getItem('vlastni_gpx_okruhy')) || {};
+        let keepAliveInterval = null;
 
         function ziskejAktualniCas() {
             const ted = new Date();
@@ -196,11 +196,35 @@
                 const server = await device.gatt.connect();
                 const service = await server.getPrimaryService(SERVICE_UUID);
                 bleCharacteristic = await service.getCharacteristic(CHARACTERISTIC_UUID);
+                
                 document.getElementById('status').innerText = "Status: SPOJENO";
                 document.getElementById('status').style.color = "#34c759";
+
+                // SPECIALITA PRO BLUEFY (iOS): Zakáže systému uspat aplikaci nebo zhasnout obrazovku
+                if (navigator.bluetooth && typeof navigator.bluetooth.setScreenDimEnabled === 'function') {
+                    navigator.bluetooth.setScreenDimEnabled(false); 
+                    console.log("Bluefy: Automatické zhasínání displeje deaktivováno.");
+                }
+
+                // SPUŠTĚNÍ KEEP-ALIVE (Posílá udržovací data každé 3 sekundy, aby iOS neukončil spojení na pozadí)
+                if (keepAliveInterval) clearInterval(keepAliveInterval);
+                keepAliveInterval = setInterval(() => {
+                    if (bleCharacteristic) {
+                        const aktualniHodiny = ziskejAktualniCas();
+                        // Pokud zrovna aktivně nenavigujeme s pozicí GPS, posíláme prázdný ping na udržení
+                        if (!posledniPozice) {
+                            posliDoBluetooth(`0,---,0,${aktualniHodiny},---`);
+                        }
+                    }
+                }, 3000);
+
             } catch (error) {
                 document.getElementById('status').innerText = "Chyba: " + error;
                 document.getElementById('status').style.color = "#ff3b30";
+                if (keepAliveInterval) {
+                    clearInterval(keepAliveInterval);
+                    keepAliveInterval = null;
+                }
             }
         });
 
