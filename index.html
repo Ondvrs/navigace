@@ -20,19 +20,18 @@
         input[type="file"] { display: none; }
         .file-label { display: inline-block; padding: 12px 20px; background: #2c2c2e; color: #fff; border-radius: 8px; cursor: pointer; margin-top: 10px; font-weight: bold; border: 1px solid #3a3a3c; }
         .data-val { font-size: 28px; font-weight: bold; color: #fff; }
-        
-        /* Styl pro vyhledávací pole a našeptávač */
+        .instr-val { font-size: 20px; font-weight: bold; color: #007aff; margin-top: 8px; }
+
         .search-container { position: relative; width: 100%; max-width: 300px; margin: 0 auto; }
         input[type="text"] { width: 100%; padding: 12px; font-size: 16px; border-radius: 8px; border: 1px solid #3a3a3c; background: #121212; color: #fff; box-sizing: border-box; }
         .suggestions-list { position: absolute; top: 100%; left: 0; right: 0; background: #2c2c2e; border: 1px solid #3a3a3c; border-radius: 8px; max-height: 200px; overflow-y: auto; z-index: 1000; list-style: none; padding: 0; margin: 5px 0 0 0; text-align: left; box-shadow: 0 4px 12px rgba(0,0,0,0.5); }
         .suggestions-list li { padding: 10px 12px; cursor: pointer; border-bottom: 1px solid #3a3a3c; font-size: 14px; color: #fff; }
         .suggestions-list li:hover { background: #3a3a3c; }
-        
-        /* Seznam uložených okruhů */
+
         .okruhy-list { text-align: left; margin-top: 15px; }
         .okruh-item { display: flex; justify-content: space-between; align-items: center; background: #2c2c2e; padding: 8px 12px; margin: 6px 0; border-radius: 8px; border: 1px solid #3a3a3c; }
         .okruh-link { color: #007aff; text-decoration: none; cursor: pointer; font-weight: bold; font-size: 14px; flex-grow: 1; }
-        
+
         .flex-wrap { display: flex; flex-wrap: wrap; justify-content: center; margin-top: 10px; }
         @keyframes blink { 50% { opacity: 0.5; } }
     </style>
@@ -41,7 +40,7 @@
 
     <h1>Beeline Navigace PRO</h1>
     <div class="subtitle">Palubní systém s vyhledáváním a vlastními okruhy</div>
-    
+
     <div class="info-box">
         <button class="btn-blue" id="connectBtn">1. Připojit k ESP32</button>
         <div id="status">Stav: Odpojeno</div>
@@ -76,6 +75,7 @@
         <p>Aktuální čas: <span id="outClock" class="data-val" style="color: #ffcc00;">--:--</span></p>
         <p>Vzdálenost k bodu: <span id="outDist" class="data-val">---</span></p>
         <p>Zbývající čas: <span id="outTime" class="data-val" style="color: #34c759;">---</span></p>
+        <div id="outInstr" class="instr-val">---</div>
         <p style="font-size: 12px; color: #666;">Režim výpočtu: <span id="speedMode">40 km/h (Město)</span></p>
         <div id="wrongWayAlert" style="color: #ff3b30; font-weight: bold; display: none; margin-top: 10px; font-size: 18px;">⚠️ OTOČ SE!</div>
         <div id="turnAlert" style="color: #ff9f0a; font-weight: bold; display: none; margin-top: 10px; font-size: 18px; animation: blink 0.6s infinite;">⚡ BLÍŽÍ SE ODBOČKA! ⚡</div>
@@ -84,22 +84,47 @@
     <script>
         const SERVICE_UUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
         const CHARACTERISTIC_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
-        
+
+        let bleDevice = null;
         let bleCharacteristic = null;
-        let gpxPoints = [];
+        let gpxPoints = [];       // pouziva se pro vlastni GPX okruhy (bez manevru)
+        let routeSteps = [];      // pouziva se pro OSRM trasu SE skutecnymi manevry
         let currentHeading = 0;
         let posledniPozice = null;
-        
-        let ciloveSouradnice = null; 
-        let isGpxMode = false; 
+
+        let ciloveSouradnice = null;
+        let isGpxMode = false;
 
         const RYCHLOST_MESTO_MS = 11.11; // 40 km/h
         const RYCHLOST_OKRESKA_MS = 22.22; // 80 km/h
-        let aktivniRychlostMS = RYCHLOST_MESTO_MS; 
+        let aktivniRychlostMS = RYCHLOST_MESTO_MS;
 
-        // Načtení uložených tras z localStorage hned při startu
         let vlastniOkruhy = JSON.parse(localStorage.getItem('vlastni_gpx_okruhy')) || {};
         let keepAliveInterval = null;
+        let wakeLock = null;
+
+        // ---------- WAKE LOCK (nahrazuje neexistujici setScreenDimEnabled) ----------
+        async function drzDisplejVzhuru() {
+            try {
+                if ('wakeLock' in navigator) {
+                    wakeLock = await navigator.wakeLock.request('screen');
+                    console.log("Wake Lock aktivni - displej se nebude uspavat.");
+                    wakeLock.addEventListener('release', () => {
+                        console.log("Wake Lock uvolnen (napr. prepnuti karty na pozadi).");
+                    });
+                } else {
+                    console.log("Wake Lock API neni v tomto prohlizeci podporovane.");
+                }
+            } catch (err) {
+                console.log("Wake Lock selhal:", err);
+            }
+        }
+        // Wake Lock se automaticky uvolni, kdyz stranka jde na pozadi - po navratu ho obnovime
+        document.addEventListener('visibilitychange', async () => {
+            if (wakeLock !== null && document.visibilityState === 'visible') {
+                await drzDisplejVzhuru();
+            }
+        });
 
         function ziskejAktualniCas() {
             const ted = new Date();
@@ -111,13 +136,12 @@
         setInterval(() => {
             const casOckem = ziskejAktualniCas();
             document.getElementById('outClock').innerText = casOckem;
-            
-            if (posledniPozice && (gpxPoints.length > 0 || ciloveSouradnice)) {
+
+            if (posledniPozice && (gpxPoints.length > 0 || routeSteps.length > 0 || ciloveSouradnice)) {
                 vyhodnotPozici(posledniPozice.lat, posledniPozice.lon, posledniPozice.speed);
             }
         }, 1000);
 
-        // Vykreslení seznamu uložených okruhů
         function aktualizujSeznamOkruhu() {
             const container = document.getElementById('okruhyContainer');
             container.innerHTML = "";
@@ -151,69 +175,73 @@
             });
         }
 
-        // Aktivace kliknutím na uložený okruh
         function aktivujUlozenyOkruh(klic) {
             const body = vlastniOkruhy[klic];
             if (!body || body.length === 0) return;
 
-            gpxPoints = JSON.parse(JSON.stringify(body)); // Hluboká kopie bodů
+            gpxPoints = JSON.parse(JSON.stringify(body));
+            routeSteps = []; // vlastni GPX nema manevry, jen body
             ciloveSouradnice = gpxPoints[gpxPoints.length - 1];
             isGpxMode = true;
 
             document.getElementById('okruhStatus').innerText = `Aktivní trasa: ${klic}`;
             document.getElementById('okruhStatus').style.color = "#34c759";
             document.getElementById('startNavBtn').disabled = false;
-            
-            // Vyčistíme klasické GPS vyhledávání, aby se to nepletlo
+
             document.getElementById('addressInput').value = "";
             document.getElementById('routeStatus').innerText = "Zatím bez cíle";
             document.getElementById('routeStatus').style.color = "#aaa";
         }
 
-        // Smazání okruhu
         function smazOkruh(klic) {
             if (confirm(`Opravdu chceš smazat okruh "${klic}"?`)) {
                 delete vlastniOkruhy[klic];
                 localStorage.setItem('vlastni_gpx_okruhy', JSON.stringify(vlastniOkruhy));
                 aktualizujSeznamOkruhu();
-                
-                // Pokud byl smazán zrovna aktivní okruh, resetujeme stav navigace
+
                 document.getElementById('okruhStatus').innerText = "Trasa smazána";
                 document.getElementById('okruhStatus').style.color = "#ff3b30";
                 document.getElementById('startNavBtn').disabled = true;
                 gpxPoints = [];
+                routeSteps = [];
             }
         }
 
-        // 1. Bluetooth Připojení
+        // ---------- BLE PŘIPOJENÍ ----------
         document.getElementById('connectBtn').addEventListener('click', async () => {
             try {
                 document.getElementById('status').innerText = "Vyhledávám...";
-                const device = await navigator.bluetooth.requestDevice({
+                bleDevice = await navigator.bluetooth.requestDevice({
                     filters: [{ name: 'Beeline-Prototyp' }],
                     optionalServices: [SERVICE_UUID]
                 });
-                const server = await device.gatt.connect();
+
+                // Oprava: reakce na neocekavane odpojeni
+                bleDevice.addEventListener('gattserverdisconnected', () => {
+                    document.getElementById('status').innerText = "Status: ODPOJENO";
+                    document.getElementById('status').style.color = "#ff3b30";
+                    bleCharacteristic = null;
+                    if (keepAliveInterval) {
+                        clearInterval(keepAliveInterval);
+                        keepAliveInterval = null;
+                    }
+                });
+
+                const server = await bleDevice.gatt.connect();
                 const service = await server.getPrimaryService(SERVICE_UUID);
                 bleCharacteristic = await service.getCharacteristic(CHARACTERISTIC_UUID);
-                
+
                 document.getElementById('status').innerText = "Status: SPOJENO";
                 document.getElementById('status').style.color = "#34c759";
 
-                // SPECIALITA PRO BLUEFY (iOS): Zakáže systému uspat aplikaci nebo zhasnout obrazovku
-                if (navigator.bluetooth && typeof navigator.bluetooth.setScreenDimEnabled === 'function') {
-                    navigator.bluetooth.setScreenDimEnabled(false); 
-                    console.log("Bluefy: Automatické zhasínání displeje deaktivováno.");
-                }
+                await drzDisplejVzhuru();
 
-                // SPUŠTĚNÍ KEEP-ALIVE (Posílá udržovací data každé 3 sekundy, aby iOS neukončil spojení na pozadí)
                 if (keepAliveInterval) clearInterval(keepAliveInterval);
                 keepAliveInterval = setInterval(() => {
                     if (bleCharacteristic) {
                         const aktualniHodiny = ziskejAktualniCas();
-                        // Pokud zrovna aktivně nenavigujeme s pozicí GPS, posíláme prázdný ping na udržení
                         if (!posledniPozice) {
-                            posliDoBluetooth(`0,---,0,${aktualniHodiny},---`);
+                            posliDoBluetooth(`0,---,0,${aktualniHodiny},---,---`);
                         }
                     }
                 }, 3000);
@@ -228,7 +256,7 @@
             }
         });
 
-        // REŽIM A: AKTIVNÍ NAŠEPTÁVAČ ADRES
+        // ---------- NAŠEPTÁVAČ ADRES ----------
         const addressInput = document.getElementById('addressInput');
         const suggestionsList = document.getElementById('suggestions');
         let debounceTimer;
@@ -245,7 +273,7 @@
                 try {
                     const response = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=5&addressdetails=1`);
                     const data = await response.json();
-                    
+
                     suggestionsList.innerHTML = "";
                     if (data.length > 0) {
                         data.forEach(item => {
@@ -269,7 +297,7 @@
         function selectSuggestion(item) {
             addressInput.value = item.display_name.split(',')[0];
             suggestionsList.style.display = "none";
-            
+
             ciloveSouradnice = {
                 lat: parseFloat(item.lat),
                 lon: parseFloat(item.lon),
@@ -279,11 +307,11 @@
             document.getElementById('routeStatus').innerText = `Cíl vybrán: ${ciloveSouradnice.name}. Zapni navigaci!`;
             document.getElementById('routeStatus').style.color = "#34c759";
             document.getElementById('startNavBtn').disabled = false;
-            
-            // Zrušíme případně vybraný GPX okruh
+
             document.getElementById('okruhStatus').innerText = "Žádný okruh nevybrán";
             document.getElementById('okruhStatus').style.color = "#aaa";
             gpxPoints = [];
+            routeSteps = [];
             isGpxMode = false;
         }
 
@@ -293,23 +321,67 @@
             }
         });
 
-        // OSRM výpočet trasy přes silnice (Rerouting)
-        async function prepocitejTrasuPresSilnice(startLat, startLon, endLat, endLon) {
-            try {
-                const response = await fetch(`https://router.project-osrm.org/route/v1/driving/${startLon},${startLat};${endLon},${endLat}?overview=full&geometries=geojson`);
-                const data = await response.json();
+        // ---------- OSRM: TRASA PO SILNICI + SKUTEČNÉ MANÉVRY ----------
+        let prepocitavaSePraveTed = false; // ochrana proti souběžným duplicitním requestům
 
-                if (data.routes && data.routes.length > 0) {
-                    const coords = data.routes[0].geometry.coordinates;
-                    gpxPoints = coords.map(c => ({ lat: c[1], lon: c[0] }));
-                    console.log("Trasa přepočítána přes silnice! Bodů:", gpxPoints.length);
-                }
-            } catch (e) {
-                console.log("Chyba výpočtu trasy přes OSRM", e);
+        function maneuverNaText(type, modifier, silniceJmeno) {
+            const jmeno = silniceJmeno ? ` na ${silniceJmeno}` : "";
+            switch (type) {
+                case "depart": return "Vyrazte" + jmeno;
+                case "arrive": return "Jste u cíle";
+                case "roundabout":
+                case "rotary": return "Vjeďte na kruhový objezd";
+                case "merge": return "Napojte se" + jmeno;
+                case "fork":
+                    if (modifier && modifier.includes("left")) return "Držte se vlevo" + jmeno;
+                    if (modifier && modifier.includes("right")) return "Držte se vpravo" + jmeno;
+                    return "Pokračujte" + jmeno;
+                case "turn":
+                case "end of road":
+                    if (!modifier) return "Odbočte" + jmeno;
+                    if (modifier === "straight") return "Pokračujte rovně" + jmeno;
+                    if (modifier === "slight left") return "Mírně vlevo" + jmeno;
+                    if (modifier === "left") return "Odbočte vlevo" + jmeno;
+                    if (modifier === "sharp left") return "Ostře vlevo" + jmeno;
+                    if (modifier === "slight right") return "Mírně vpravo" + jmeno;
+                    if (modifier === "right") return "Odbočte vpravo" + jmeno;
+                    if (modifier === "sharp right") return "Ostře vpravo" + jmeno;
+                    if (modifier === "uturn") return "Otočte se";
+                    return "Odbočte" + jmeno;
+                case "new name":
+                case "continue": return "Pokračujte rovně" + jmeno;
+                default: return "Pokračujte" + jmeno;
             }
         }
 
-        // REŽIM B/C: PARSOVÁNÍ A UKLÁDÁNÍ VLASTNÍHO GPX
+        async function prepocitejTrasuPresSilnice(startLat, startLon, endLat, endLon) {
+            if (prepocitavaSePraveTed) return;
+            prepocitavaSePraveTed = true;
+            try {
+                const response = await fetch(`https://router.project-osrm.org/route/v1/driving/${startLon},${startLat};${endLon},${endLat}?overview=full&geometries=geojson&steps=true`);
+                const data = await response.json();
+
+                if (data.routes && data.routes.length > 0) {
+                    const leg = data.routes[0].legs[0];
+                    routeSteps = leg.steps.map(s => ({
+                        lat: s.maneuver.location[1],
+                        lon: s.maneuver.location[0],
+                        text: maneuverNaText(s.maneuver.type, s.maneuver.modifier, s.name),
+                        distance: s.distance
+                    }));
+                    // gpxPoints necháme jako hustou čáru pro přesné sledování polohy na trase
+                    const coords = data.routes[0].geometry.coordinates;
+                    gpxPoints = coords.map(c => ({ lat: c[1], lon: c[0] }));
+                    console.log("Trasa přepočítána. Manévrů:", routeSteps.length, "| Bodů čáry:", gpxPoints.length);
+                }
+            } catch (e) {
+                console.log("Chyba výpočtu trasy přes OSRM", e);
+            } finally {
+                prepocitavaSePraveTed = false;
+            }
+        }
+
+        // ---------- GPX IMPORT ----------
         document.getElementById('gpxFile').addEventListener('change', function(e) {
             const file = e.target.files[0];
             if (!file) return;
@@ -319,7 +391,7 @@
                 const xmlDoc = parser.parseFromString(evt.target.result, "text/xml");
                 let gpxElements = xmlDoc.getElementsByTagName("trkpt");
                 if (gpxElements.length === 0) gpxElements = xmlDoc.getElementsByTagName("rtept");
-                
+
                 let docasneBody = [];
                 for (let i = 0; i < gpxElements.length; i++) {
                     const lat = parseFloat(gpxElements[i].getAttribute("lat"));
@@ -328,14 +400,10 @@
                 }
 
                 if (docasneBody.length > 0) {
-                    // Odstraníme příponu .gpx z názvu
                     const cistyNazev = file.name.replace(/\.gpx$/i, '');
-                    
-                    // Uložíme trasu do paměti prohlížeče
                     vlastniOkruhy[cistyNazev] = docasneBody;
                     localStorage.setItem('vlastni_gpx_okruhy', JSON.stringify(vlastniOkruhy));
-                    
-                    // Aktualizujeme seznam a rovnou tuto trasu načteme
+
                     aktualizujSeznamOkruhu();
                     aktivujUlozenyOkruh(cistyNazev);
 
@@ -350,7 +418,7 @@
         });
 
         function spoctiVzdalenost(lat1, lon1, lat2, lon2) {
-            const R = 6371e3; 
+            const R = 6371e3;
             const phi1 = lat1 * Math.PI/180; const phi2 = lat2 * Math.PI/180;
             const deltaPhi = (lat2-lat1) * Math.PI/180; const deltaLambda = (lon2-lon1) * Math.PI/180;
             const a = Math.sin(deltaPhi/2) * Math.sin(deltaPhi/2) + Math.cos(phi1) * Math.cos(phi2) * Math.sin(deltaLambda/2) * Math.sin(deltaLambda/2);
@@ -382,48 +450,62 @@
             return `${h}h ${m}m`;
         }
 
-        // Navigační logika
-        async function vyhodnotPozici(myLat, myLon, aktualniRychlostMS) {
-            if (gpxPoints.length === 0 && ciloveSouradnice) {
+        // ---------- NAVIGAČNÍ LOGIKA ----------
+        async function vyhodnotPozici(myLat, myLon, aktualniRychlost) {
+            if (gpxPoints.length === 0 && routeSteps.length === 0 && ciloveSouradnice) {
                 await prepocitejTrasuPresSilnice(myLat, myLon, ciloveSouradnice.lat, ciloveSouradnice.lon);
                 return;
             }
             if (gpxPoints.length === 0) return;
 
-            if (aktualniRychlostMS !== null && aktualniRychlostMS !== undefined) {
-                let rychlostKmh = aktualniRychlostMS * 3.6;
+            if (aktualniRychlost !== null && aktualniRychlost !== undefined) {
+                let rychlostKmh = aktualniRychlost * 3.6;
                 if (rychlostKmh > 60) {
                     aktivniRychlostMS = RYCHLOST_OKRESKA_MS;
                     document.getElementById('speedMode').innerText = "80 km/h (Okreska)";
-                } else if (rychlostKmh > 5) { 
+                } else if (rychlostKmh > 5) {
                     aktivniRychlostMS = RYCHLOST_MESTO_MS;
                     document.getElementById('speedMode').innerText = "40 km/h (Město)";
                 }
             }
 
+            // Nejbližší nadcházející manévr (pokud jde o OSRM trasu se steps)
+            let textPokynu = "Pokračujte rovně";
+            let vzdalenostKManevru = null;
+            if (routeSteps.length > 0) {
+                const dalsiManevr = routeSteps[0];
+                vzdalenostKManevru = spoctiVzdalenost(myLat, myLon, dalsiManevr.lat, dalsiManevr.lon);
+                if (vzdalenostKManevru < 20 && routeSteps.length > 1) {
+                    routeSteps.shift();
+                }
+                textPokynu = routeSteps[0].text;
+                document.getElementById('outInstr').innerText = textPokynu;
+            } else {
+                document.getElementById('outInstr').innerText = "---";
+            }
+
             let aktivniBod = gpxPoints[0];
             let vzdalenostKAktivnimuBodu = spoctiVzdalenost(myLat, myLon, aktivniBod.lat, aktivniBod.lon);
 
-            // Projetí bodu pod 20 metrů
             if (vzdalenostKAktivnimuBodu < 20 && gpxPoints.length > 1) {
-                gpxPoints.shift(); 
+                gpxPoints.shift();
                 aktivniBod = gpxPoints[0];
                 vzdalenostKAktivnimuBodu = spoctiVzdalenost(myLat, myLon, aktivniBod.lat, aktivniBod.lon);
             }
 
-            // Přepočet trasy / Bloudění (80+ metrů)
             if (vzdalenostKAktivnimuBodu > 80) {
                 if (isGpxMode) {
                     document.getElementById('wrongWayAlert').style.display = "block";
                     document.getElementById('turnAlert').style.display = "none";
                     document.getElementById('outDist').innerText = "OTOC SE";
                     let aktualniHodiny = ziskejAktualniCas();
-                    posliDoBluetooth(`999,---,0,${aktualniHodiny},OTOC SE`);
+                    posliDoBluetooth(`999,---,0,${aktualniHodiny},OTOC SE,OTOC SE`);
                     return;
                 } else {
                     console.log("Sjel jsi z trasy. Přepočítávám novou cestu...");
+                    routeSteps = [];
                     await prepocitejTrasuPresSilnice(myLat, myLon, ciloveSouradnice.lat, ciloveSouradnice.lon);
-                    return; 
+                    return;
                 }
             }
 
@@ -438,17 +520,18 @@
 
             document.getElementById('outTime').innerText = casText;
 
-            // BLIKÁNÍ NA DISPLEJI POD 40 METRŮ
-            if (vzdalenostKAktivnimuBodu < 40) { 
+            const jeBlizkoOdbocky = vzdalenostKManevru !== null ? vzdalenostKManevru < 40 : vzdalenostKAktivnimuBodu < 40;
+
+            if (jeBlizkoOdbocky) {
                 document.getElementById('wrongWayAlert').style.display = "none";
                 document.getElementById('turnAlert').style.display = "block";
                 document.getElementById('outDist').innerText = vzdText;
-                posliDoBluetooth(`${Math.round(uhelSipky)},${casText},1,${aktualniHodiny},${vzdText}`);
+                posliDoBluetooth(`${Math.round(uhelSipky)},${casText},1,${aktualniHodiny},${vzdText},${textPokynu}`);
             } else {
                 document.getElementById('wrongWayAlert').style.display = "none";
                 document.getElementById('turnAlert').style.display = "none";
                 document.getElementById('outDist').innerText = vzdText;
-                posliDoBluetooth(`${Math.round(uhelSipky)},${casText},0,${aktualniHodiny},${vzdText}`);
+                posliDoBluetooth(`${Math.round(uhelSipky)},${casText},0,${aktualniHodiny},${vzdText},${textPokynu}`);
             }
         }
 
@@ -461,7 +544,7 @@
             }
         }
 
-        // Spuštění navigace
+        // ---------- SPUŠTĚNÍ NAVIGACE ----------
         document.getElementById('startNavBtn').addEventListener('click', async () => {
             document.getElementById('status').innerText = "Navigace aktivní";
             document.getElementById('status').style.color = "#34c759";
@@ -490,7 +573,6 @@
             }, null, { enableHighAccuracy: true, maximumAge: 0, timeout: 5000 });
         });
 
-        // Vykreslit uložené okruhy při načtení stránky
         aktualizujSeznamOkruhu();
     </script>
 </body>
