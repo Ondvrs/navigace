@@ -212,8 +212,8 @@
             try {
                 document.getElementById('status').innerText = "Vyhledávám...";
                 bleDevice = await navigator.bluetooth.requestDevice({
-                    filters: [{ name: 'Beeline-Prototyp' }],
-                    optionalServices: [SERVICE_UUID]
+    			acceptAllDevices: true,
+    			optionalServices: [SERVICE_UUID]
                 });
 
                 // Oprava: reakce na neocekavane odpojeni
